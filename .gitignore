@@ -1,0 +1,12 @@
+logs
+data
+AppData
+.vscode
+.gradio
+Lab_2/__pycache__
+Lab_2/checkpoint_distilbert
+Lab_2/checkpoint_distilbert_LoRA
+Lab_2/distilbert_finetuned
+Lab_2/distilbert_finetuned_LoRA
+Lab_2/CLIP_Semantic_Indexer/__pycache__
+__pycache__
