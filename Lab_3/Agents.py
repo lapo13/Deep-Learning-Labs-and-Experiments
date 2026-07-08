@@ -1,12 +1,15 @@
 import torch
-from torch.nn.functional import mse_loss
+import torch.nn.functional as F
 from torch.distributions import Categorical
-import os
+import numpy as np
+import os, random
 from DataStructures import EpisodeData, ReinforceData
+import tqdm as tq
 
 
 class ReinforceAgent:
-     def __init__(self, policy, optimizer, env, gamma=0.99, loss=lambda log_probs, returns: (-log_probs * returns).mean(), model_path="./model"):
+     def __init__(self, policy, optimizer, env, gamma=0.99,
+                   loss=lambda log_probs, returns: (-log_probs * returns).mean(), model_path="./model"):
           self.env = env
           self.policy = policy
           self.opt = optimizer
@@ -127,7 +130,8 @@ class ReinforceAgent:
      
 
 class ReinforceAgentWithBaseline(ReinforceAgent):
-     def __init__(self, policy, opt, env, baseline, critic_opt, gamma=0.99, loss=lambda log_probs, returns: (-log_probs * returns).mean(), critic_loss = mse_loss, model_path="./model"):
+     def __init__(self, policy, opt, env, baseline, critic_opt, gamma=0.99, loss=lambda log_probs, returns: (-log_probs * returns).mean(),
+                   critic_loss = F.mse_loss, model_path="./model"):
           super().__init__(policy, opt, env, gamma, loss, model_path)
           self.critic = baseline
           self.critic_opt = critic_opt
@@ -162,7 +166,8 @@ class ReinforceAgentWithBaseline(ReinforceAgent):
                
           return EpisodeData(observations, actions, torch.cat(log_probs), rewards, episode_length, values_tensor)
      
-     def reinforce(self, env_render=None, num_episodes=10, checkpoint = False, N = 100, M = 10, standardize = False):
+     def reinforce(self, env_render=None, num_episodes=10,
+                   checkpoint = False, N = 100, M = 10, standardize = False):
           running_rewards, M_mean_reward, M_mean_length, loss_values = [0.0], [], [], []
           best_reward = -float('inf')
           
@@ -175,7 +180,7 @@ class ReinforceAgentWithBaseline(ReinforceAgent):
                
                (_, _, log_probs, rewards, _) = episode_data
                
-               values_clean = episode_data.state_values
+               values_clean = episode_data.state_values.view(-1)
                
                returns = torch.tensor(self.compute_returns(rewards), dtype=torch.float32)
 
@@ -223,3 +228,4 @@ class ReinforceAgentWithBaseline(ReinforceAgent):
           self.policy.eval()
           self.critic.eval()
           return ReinforceData(running_rewards, M_mean_reward, M_mean_length, loss_values)
+     

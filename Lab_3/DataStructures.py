@@ -1,4 +1,4 @@
-# Creiamo un contenitore leggero che si comporta come una normale tupla a 5 elementi
+
 class EpisodeData(tuple):
      def __new__(cls, observations, actions, log_probs, rewards, length, state_values):
           return super().__new__(cls, (observations, actions, log_probs, rewards, length))
@@ -12,4 +12,5 @@ class ReinforceData(tuple):
      
      def __init__(self, running_rewards, M_mean_reward, M_mean_length, loss_values):
           self.loss_values = loss_values
+
      
