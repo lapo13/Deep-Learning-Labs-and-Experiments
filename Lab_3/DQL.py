@@ -193,3 +193,123 @@ class DeepQLearningAgent:
                     run.log({"train/epsilon": epsilon}, step=global_step)
 
         return
+    
+
+class DeepQLearningMultiAgent(DeepQLearningAgent):
+    def __init__(self, policy_net, target_net, optimizer, envs, eval_env, memory,
+                 loss_fn=F.mse_loss, batch_size=32, gamma=0.99, tau=0.005,
+                 double=False, device=None):
+        # IMPORTANTE: alla base passiamo l'ambiente VETTORIZZATO come self.env,
+        # così self.env.num_envs e self.env.single_action_space funzionano.
+        super().__init__(policy_net, target_net, optimizer, envs, memory,
+                         loss_fn, batch_size, gamma, tau, double, device)
+        self.eval_env = eval_env   # ambiente SERIALE, usato solo per la valutazione
+
+    def get_action(self, state, epsilon):
+        num_envs = self.env.num_envs
+        n_actions = self.env.single_action_space.n
+
+        state_t = torch.as_tensor(state, dtype=torch.float32, device=self.device)
+        with torch.no_grad():
+            q_values = self.policy_net(state_t)              # (num_envs, n_actions)
+        greedy = q_values.argmax(dim=1).cpu().numpy()        # (num_envs,)
+
+        random_a = np.random.randint(0, n_actions, size=num_envs)
+        explore = np.random.random(num_envs) < epsilon       # una scelta per env
+        return np.where(explore, random_a, greedy)           # (num_envs,)
+
+    def _valuation(self, M, run, step):
+        episode_rewards, episode_lengths = [], []
+        self.policy_net.eval()
+        with torch.no_grad():
+            for _ in range(M):
+                state, _ = self.eval_env.reset()
+                total_reward, length = 0.0, 0
+                while True:
+                    state_t = torch.as_tensor(
+                        state, dtype=torch.float32, device=self.device
+                    ).unsqueeze(0)
+                    action = self.policy_net(state_t).argmax(dim=1).item()
+                    state, reward, terminated, truncated, _ = self.eval_env.step(action)
+                    total_reward += reward
+                    length += 1
+                    if terminated or truncated:
+                        break
+                episode_rewards.append(total_reward)
+                episode_lengths.append(length)
+        mean_reward = sum(episode_rewards) / M
+        mean_length = sum(episode_lengths) / M
+        if run is not None:
+            run.log({"eval/mean_reward": mean_reward,
+                     "eval/mean_length": mean_length}, step=step)
+        self.policy_net.train()
+        return 
+
+    def DeepQLearning(self, episodes, epsilon=0.7, epsilon_min=0.3, epsilon_decay=0.001,
+                      max_steps=500, start_training=1000, N=20, M=10, seed=None,
+                      run=None):
+        self._trained = True
+        num_envs = self.env.num_envs
+        avg_window = 100
+
+        # budget: stesse transizioni totali della versione seriale (episodes*max_steps),
+        # ma ogni iterazione del loop ne raccoglie num_envs -> divido.
+        total_steps = (episodes * max_steps) // num_envs
+        evaluate_every = max(1, (N * max_steps) // num_envs)
+
+        # accumulatori dell'episodio in corso, uno per env
+        current_reward = np.zeros(num_envs, dtype=np.float32)
+        current_length = np.zeros(num_envs, dtype=np.int32)
+        # medie mobili aggregate sugli ultimi avg_window episodi conclusi
+        reward_window = deque(maxlen=avg_window)
+        length_window = deque(maxlen=avg_window)
+
+        state, _ = self.env.reset(seed=seed)
+        episode_start = np.zeros(num_envs, dtype=bool)
+
+        for global_step in tq.tqdm(range(total_steps), desc="Training"):
+            action = self.get_action(state, epsilon)
+            next_state, reward, terminated, truncated, _ = self.env.step(action)
+
+            current_reward += reward
+            current_length += 1
+
+            # salva le transizioni, saltando quelle "a ponte" dopo l'autoreset
+            for i in range(num_envs):
+                if not episode_start[i]:
+                    self.ReplayMemory.append(
+                        (state[i], action[i], reward[i], next_state[i], terminated[i])
+                    )
+
+            done = np.logical_or(terminated, truncated)
+            # per ogni env appena finito: chiudi episodio, aggiorna media, resetta
+            for i in range(num_envs):
+                if done[i]:
+                    reward_window.append(current_reward[i])
+                    length_window.append(current_length[i])
+                    current_reward[i] = 0.0
+                    current_length[i] = 0
+
+            episode_start = done
+            state = next_state
+
+            self.replay(start_training=start_training)
+
+            # logging periodico delle medie mobili aggregate
+            if run is not None and global_step % 100 == 0 and len(reward_window) > 0:
+                run.log({
+                    "train/avg_reward": np.mean(reward_window),
+                    "train/avg_length": np.mean(length_window),
+                }, step=global_step)
+
+            # valutazione periodica sull'ambiente seriale
+            if global_step % evaluate_every == 0 and run is not None:
+                self._valuation(M, run, step=global_step)
+
+            # decay di epsilon (attenzione: qui è PER STEP del loop, non per episodio)
+            if epsilon > epsilon_min:
+                epsilon = max(epsilon_min, epsilon - epsilon_decay)
+                if run is not None:
+                    run.log({"train/epsilon": epsilon}, step=global_step)
+
+        return
