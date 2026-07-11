@@ -3,6 +3,7 @@ import torch.nn.functional as F
 import numpy as np
 import random
 import tqdm as tq
+from collections import deque
 
 
 class DeepQLearningAgent:
@@ -19,15 +20,27 @@ class DeepQLearningAgent:
         self.optimizer = optimizer
         self.loss_fn = loss_fn
         self.env = env
-        self.memory = memory          
+        self.ReplayMemory = memory          
         self.batch_size = batch_size
         self.gamma = gamma
         self.tau = tau                 
-        self.double = double            
+        self.double = double
+        self._trained = False  
 
 
         self.target_net.load_state_dict(self.policy_net.state_dict())
         self.target_net.eval()
+
+    def load_model(self, policy_path, target_path):
+        self.policy_net.load_state_dict(torch.load(policy_path, map_location=self.device))
+        self.target_net.load_state_dict(torch.load(target_path, map_location=self.device))
+        self.policy_net.eval()
+        self.target_net.eval()
+        self._trained = True
+
+    def save_model(self, policy_path, target_path):
+        torch.save(self.policy_net.state_dict(), policy_path)
+        torch.save(self.target_net.state_dict(), target_path)
 
     def get_action(self, state, epsilon):
         if random.random() < epsilon:
@@ -46,11 +59,11 @@ class DeepQLearningAgent:
                 tp.data.add_(self.tau * pp.data)
 
     def replay(self, start_training=1000):
-        if len(self.memory) < start_training:
+        if len(self.ReplayMemory) < start_training:
             return None
 
         self.policy_net.train()
-        minibatch = random.sample(list(self.memory), self.batch_size)
+        minibatch = random.sample(list(self.ReplayMemory), self.batch_size)
         states, actions, rewards, next_states, dones = zip(*minibatch)
 
         # Solo il minibatch viene spostato sul device (il buffer resta su CPU).
@@ -70,41 +83,14 @@ class DeepQLearningAgent:
                 next_q = self.target_net(next_states).max(1, keepdim=True)[0]
             target_q = rewards + self.gamma * next_q * (1.0 - dones)
 
-        loss = self.loss_fn(current_q, target_q)
-
         self.optimizer.zero_grad()
-        loss.backward()
+        self.loss_fn(current_q, target_q).backward()
         self.optimizer.step()
 
         self.soft_update()
 
-        return loss.item()
-
-    def valuation(self, M):
-        episode_rewards, episode_lengths = [], []
-        self.policy_net.eval()
-
-        with torch.no_grad():
-            for _ in range(M):
-                state = self.env.reset()[0]
-                total_reward, length = 0, 0
-                while True:
-                    action = self.get_action(state, epsilon=0.0)
-                    next_state, reward, terminated, truncated, _ = self.env.step(action)
-                    total_reward += reward
-                    length += 1
-                    state = next_state
-                    if terminated or truncated:
-                        break
-                episode_rewards.append(total_reward)
-                episode_lengths.append(length)
-
-        mean_reward = sum(episode_rewards) / M
-        mean_length = sum(episode_lengths) / M
-
-        self.policy_net.train()
-        return mean_reward, mean_length
-
+        return
+    
     def play(self, env, episodes=3, verbose=True):
         """
         Mostra l'agente addestrato (policy greedy) su un ambiente con render_mode="human".
@@ -127,33 +113,83 @@ class DeepQLearningAgent:
             env.close()
             self.policy_net.train()
 
+    def _valuation(self, M, run, step):
+        episode_rewards, episode_lengths = [], []
+        self.policy_net.eval()
+
+        with torch.no_grad():
+            for _ in range(M):
+                state = self.env.reset()[0]
+                total_reward, length = 0, 0
+                while True:
+                    action = self.get_action(state, epsilon=0.0)
+                    next_state, reward, terminated, truncated, _ = self.env.step(action)
+                    total_reward += reward
+                    length += 1
+                    state = next_state
+                    if terminated or truncated:
+                        break
+                episode_rewards.append(total_reward)
+                episode_lengths.append(length)
+
+        mean_reward = sum(episode_rewards) / M
+        mean_length = sum(episode_lengths) / M
+
+        run.log({"mean_reward": mean_reward, "mean_length": mean_length}, step=step)
+
+        self.policy_net.train()
+        return 
+
     def DeepQLearning(self, episodes, epsilon=0.7, epsilon_min=0.3, epsilon_decay=0.001,
-                      max_steps=500, start_training=1000, N=20, M=10):
-        rewards, lengths, losses = [], [], []
+                  max_steps=500, start_training=1000, N=20, M=10, seed=None,
+                  run=None):
+        self._trained = True
+        global_step = 0
+        avg_window = int(episodes*0.1)  # dimensione della finestra per le medie mobili
+        print(f"Dimensione della finestra per le medie mobili: {avg_window}")
+
+        # finestre scorrevoli per le medie mobili
+        reward_window = deque(maxlen=avg_window)
+        length_window = deque(maxlen=avg_window)
 
         for episode in tq.tqdm(range(episodes), desc="Training"):
-            state = self.env.reset()[0]
+            state = self.env.reset(seed=seed)[0]
+            episode_reward = 0.0
+            episode_length = 0
 
             for step in range(max_steps):
                 action = self.get_action(state, epsilon)
                 next_state, reward, terminated, truncated, _ = self.env.step(action)
-
-                self.memory.append((state, action, reward, next_state, terminated))
+                self.ReplayMemory.append((state, action, reward, next_state, terminated))
                 state = next_state
 
-                l = self.replay(start_training=start_training)
-                if l is not None:
-                    losses.append(l)
+                episode_reward += reward
+                episode_length += 1
 
+                self.replay(start_training=start_training)
+
+                global_step += 1
                 if terminated or truncated:
                     break
 
-            if N != 0 and episode % N == 0:
-                reward_mean, length_mean = self.valuation(M)
-                rewards.append(reward_mean)
-                lengths.append(length_mean)
+            # aggiorna le finestre e calcola le medie mobili
+            reward_window.append(episode_reward)
+            length_window.append(episode_length)
+            avg_reward = sum(reward_window) / len(reward_window)
+            avg_length = sum(length_window) / len(length_window)
+
+            if run is not None:
+                run.log({
+                    "train/avg_reward": avg_reward,
+                    "train/avg_length": avg_length,
+                }, step=global_step)
+
+            if N != 0 and episode % N == 0 and run is not None:
+                self._valuation(M, run, step=global_step)
 
             if epsilon > epsilon_min:
                 epsilon = max(epsilon_min, epsilon - epsilon_decay)
+                if run is not None:
+                    run.log({"train/epsilon": epsilon}, step=global_step)
 
-        return rewards, lengths, losses
+        return
