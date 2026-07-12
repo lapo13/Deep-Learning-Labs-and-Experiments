@@ -199,8 +199,6 @@ class DeepQLearningMultiAgent(DeepQLearningAgent):
     def __init__(self, policy_net, target_net, optimizer, envs, eval_env, memory,
                  loss_fn=F.mse_loss, batch_size=32, gamma=0.99, tau=0.005,
                  double=False, device=None):
-        # IMPORTANTE: alla base passiamo l'ambiente VETTORIZZATO come self.env,
-        # così self.env.num_envs e self.env.single_action_space funzionano.
         super().__init__(policy_net, target_net, optimizer, envs, memory,
                          loss_fn, batch_size, gamma, tau, double, device)
         self.eval_env = eval_env   # ambiente SERIALE, usato solo per la valutazione
